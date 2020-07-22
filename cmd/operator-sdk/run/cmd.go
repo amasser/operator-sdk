@@ -16,20 +16,23 @@ package run
 
 import (
 	"github.com/spf13/cobra"
+
+	"github.com/operator-framework/operator-sdk/cmd/operator-sdk/run/packagemanifests"
 )
 
-// NewCmd returns a command that contains subcommands to run specific
-// operator types.
 func NewCmd() *cobra.Command {
-	runCmd := &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Runs a generic operator",
-		Long: `Runs a generic operator. This is intended to be used when running
-in a Pod inside a cluster. Developers wanting to run their operator locally
-should use "up local" instead.`,
+		Short: "Run an Operator in a variety of environments",
+		Long: `This command has subcommands that will deploy your Operator with OLM.
+Currently only the package manifests format is supported via the 'packagemanifests' subcommand.
+Run 'operator-sdk run --help' for more information.
+`,
 	}
 
-	runCmd.AddCommand(newRunAnsibleCmd())
-	runCmd.AddCommand(newRunHelmCmd())
-	return runCmd
+	cmd.AddCommand(
+		packagemanifests.NewCmd(),
+	)
+
+	return cmd
 }

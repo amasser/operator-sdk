@@ -23,10 +23,10 @@ import (
 	"strings"
 
 	homedir "github.com/mitchellh/go-homedir"
-	"github.com/pkg/errors"
 	"github.com/rogpeppe/go-internal/modfile"
 	log "github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
+
+	kbutil "github.com/operator-framework/operator-sdk/internal/util/kubebuilder"
 )
 
 const (
@@ -35,12 +35,17 @@ const (
 	GoModEnv   = "GO111MODULE"
 	SrcDir     = "src"
 
-	fsep            = string(filepath.Separator)
-	mainFile        = "cmd" + fsep + "manager" + fsep + "main.go"
-	buildDockerfile = "build" + fsep + "Dockerfile"
-	rolesDir        = "roles"
-	helmChartsDir   = "helm-charts"
-	goModFile       = "go.mod"
+	fsep              = string(filepath.Separator)
+	mainFile          = "main.go"
+	managerMainFile   = "cmd" + fsep + "manager" + fsep + mainFile
+	buildDockerfile   = "build" + fsep + "Dockerfile"
+	rolesDir          = "roles"
+	requirementsFile  = "requirements.yml"
+	moleculeDir       = "molecule"
+	goModFile         = "go.mod"
+	defaultPermission = 0644
+
+	noticeColor = "\033[1;36m%s\033[0m"
 )
 
 // OperatorType - the type of operator
@@ -78,23 +83,24 @@ func MustInProjectRoot() {
 
 // CheckProjectRoot checks if the current dir is the project root, and returns
 // an error if not.
+// "build/Dockerfile" may not be present in all projects
+// todo: scaffold Project file for Ansible and Helm with the type information
 func CheckProjectRoot() error {
+	if kbutil.HasProjectFile() {
+		return nil
+	}
+
+	// todo(camilamacedo86): remove the following check when we no longer support the legacy scaffold layout
 	// If the current directory has a "build/Dockerfile", then it is safe to say
 	// we are at the project root.
 	if _, err := os.Stat(buildDockerfile); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("must run command in project root dir: project structure requires %s", buildDockerfile)
+			return fmt.Errorf("must run command in project root dir: project structure requires %s",
+				buildDockerfile)
 		}
-		return errors.Wrap(err, "error while checking if current directory is the project root")
+		return fmt.Errorf("error while checking if current directory is the project root: %v", err)
 	}
 	return nil
-}
-
-func CheckGoProjectCmd(cmd *cobra.Command) error {
-	if IsOperatorGo() {
-		return nil
-	}
-	return fmt.Errorf("'%s' can only be run for Go operators; %s does not exist", cmd.CommandPath(), mainFile)
 }
 
 func MustGetwd() string {
@@ -113,9 +119,19 @@ func getHomeDir() (string, error) {
 	return homedir.Expand(hd)
 }
 
+// TODO(hasbro17): If this function is called in the subdir of
+// a module project it will fail to parse go.mod and return
+// the correct import path.
+// This needs to be fixed to return the pkg import path for any subdir
+// in order for `generate csv` to correctly form pkg imports
+// for API pkg paths that are not relative to the root dir.
+// This might not be fixable since there is no good way to
+// get the project root from inside the subdir of a module project.
+//
 // GetGoPkg returns the current directory's import path by parsing it from
 // wd if this project's repository path is rooted under $GOPATH/src, or
 // from go.mod the project uses Go modules to manage dependencies.
+// If the project has a go.mod then wd must be the project root.
 //
 // Example: "github.com/example-inc/app-operator"
 func GetGoPkg() string {
@@ -151,7 +167,8 @@ func GetGoPkg() string {
 		goPath = MustSetWdGopath(goPath)
 	}
 	if !strings.HasPrefix(MustGetwd(), goPath) {
-		log.Fatal("Could not determine project repository path: $GOPATH not set, wd in default $HOME/go/src, or wd does not contain a go.mod")
+		log.Fatal("Could not determine project repository path: $GOPATH not set, wd in default $HOME/go/src," +
+			" or wd does not contain a go.mod")
 	}
 	return parseGoPkg(goPath)
 }
@@ -169,6 +186,7 @@ func parseGoPkg(gopath string) string {
 // This function should be called after verifying the user is in project root.
 func GetOperatorType() OperatorType {
 	switch {
+	// TODO: Differentiate between legacy and KB Go projects
 	case IsOperatorGo():
 		return OperatorTypeGo
 	case IsOperatorAnsible():
@@ -179,29 +197,79 @@ func GetOperatorType() OperatorType {
 	return OperatorTypeUnknown
 }
 
-func IsOperatorGo() bool {
-	_, err := os.Stat(mainFile)
-	return err == nil
-}
-
-func IsOperatorAnsible() bool {
-	stat, err := os.Stat(rolesDir)
-	return err == nil && stat.IsDir()
-}
-
-func IsOperatorHelm() bool {
-	stat, err := os.Stat(helmChartsDir)
-	return err == nil && stat.IsDir()
-}
-
-// MustGetGopath gets GOPATH and ensures it is set and non-empty. If GOPATH
-// is not set or empty, MustGetGopath exits.
-func MustGetGopath() string {
-	gopath, ok := os.LookupEnv(GoPathEnv)
-	if !ok || len(gopath) == 0 {
-		log.Fatal("GOPATH env not set")
+// PluginKeyToOperatorType converts a plugin key string to an operator project
+// type.
+// TODO(estroz): this can probably be made more robust by checking known
+// plugin keys directly.
+func PluginKeyToOperatorType(pluginKey string) OperatorType {
+	switch {
+	case strings.HasPrefix(pluginKey, "go"):
+		return OperatorTypeGo
+	case strings.HasPrefix(pluginKey, "helm"):
+		return OperatorTypeHelm
+	case strings.HasPrefix(pluginKey, "ansible"):
+		return OperatorTypeAnsible
 	}
-	return gopath
+	return OperatorTypeUnknown
+}
+
+// IsOperatorGo returns true when the layout field in PROJECT file has the Go prefix key.
+// NOTE: For the legacy, returns true when the project contains the cmd/manager directory and main.go file.
+func IsOperatorGo() bool {
+	// If the project has the new layout we will check the type in the config file
+	if kbutil.HasProjectFile() {
+		cfg, err := kbutil.ReadConfig()
+		if err != nil {
+			log.Fatalf("Error reading config: %v", err)
+		}
+		return cfg.IsV2() || PluginKeyToOperatorType(cfg.Layout) == OperatorTypeGo
+	}
+
+	// todo: remove the following code when the legacy layout is no longer supported
+	// we can check it using the Project File
+	_, err := os.Stat(managerMainFile)
+	if err == nil || os.IsExist(err) {
+		return true
+	}
+	// Aware of an alternative location for main.go.
+	_, err = os.Stat(mainFile)
+	return err == nil || os.IsExist(err)
+}
+
+// IsOperatorAnsible returns true when the layout field in PROJECT file has the Ansible prefix key.
+// NOTE: For the legacy, returns true when the project  contains the roles and the molecule directory.
+func IsOperatorAnsible() bool {
+	// If the project is in the new layout, check the config file's plugin type.
+	if kbutil.HasProjectFile() {
+		cfg, err := kbutil.ReadConfig()
+		if err != nil {
+			log.Fatalf("Error reading config: %v", err)
+		}
+		return PluginKeyToOperatorType(cfg.Layout) == OperatorTypeAnsible
+	}
+	// todo(camilamacedo86): remove when the legacy layout is no longer supported
+	stat, err := os.Stat(rolesDir)
+	if (err == nil && stat.IsDir()) || os.IsExist(err) {
+		return true
+	}
+	stat, err = os.Stat(moleculeDir)
+	if (err == nil && stat.IsDir()) || os.IsExist(err) {
+		return true
+	}
+	_, err = os.Stat(requirementsFile)
+	return err == nil || os.IsExist(err)
+}
+
+// IsOperatorHelm returns true when the layout field in PROJECT file has the Helm prefix key.
+func IsOperatorHelm() bool {
+	if !kbutil.HasProjectFile() {
+		return false
+	}
+	cfg, err := kbutil.ReadConfig()
+	if err != nil {
+		log.Fatalf("Error reading config: %v", err)
+	}
+	return PluginKeyToOperatorType(cfg.Layout) == OperatorTypeHelm
 }
 
 // MustSetWdGopath sets GOPATH to the first element of the path list in
@@ -243,20 +311,6 @@ func SetGoVerbose() error {
 	return nil
 }
 
-// CheckRepo ensures dependency manager type and repo are being used in combination
-// correctly, as different dependency managers have different Go environment
-// requirements.
-func CheckRepo(repo string) error {
-	inGopathSrc, err := WdInGoPathSrc()
-	if err != nil {
-		return err
-	}
-	if !inGopathSrc && repo == "" {
-		return fmt.Errorf(`flag --repo must be set if the working directory is not in $GOPATH/src. See "operator-sdk new -h"`)
-	}
-	return nil
-}
-
 // CheckGoModules ensures that go modules are enabled.
 func CheckGoModules() error {
 	goModOn, err := GoModOn()
@@ -265,7 +319,48 @@ func CheckGoModules() error {
 	}
 	if !goModOn {
 		return fmt.Errorf(`using go modules requires GO111MODULE="on", "auto", or unset.` +
-			` More info: https://github.com/operator-framework/operator-sdk/blob/master/doc/user-guide.md#go-modules`)
+			` More info: https://sdk.operatorframework.io/docs/golang/quickstart/#a-note-on-dependency-management`)
 	}
 	return nil
+}
+
+// PrintDeprecationWarning prints a colored warning wrapping msg to the terminal.
+func PrintDeprecationWarning(msg string) {
+	fmt.Fprintf(os.Stderr, noticeColor, "[Deprecation Notice] "+msg+"\n")
+}
+
+// RewriteFileContents adds newContent to the line after the last occurrence of target in filename's contents,
+// then writes the updated contents back to disk.
+func RewriteFileContents(filename, target, newContent string) error {
+	text, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("error in getting contents from the file, %v", err)
+	}
+
+	modifiedContent, err := appendContent(string(text), target, newContent)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(filename, []byte(modifiedContent), defaultPermission)
+	if err != nil {
+		return fmt.Errorf("error writing modified contents to file, %v", err)
+	}
+	return nil
+}
+
+func appendContent(fileContents, target, newContent string) (string, error) {
+	labelIndex := strings.LastIndex(fileContents, target)
+	if labelIndex == -1 {
+		return "", fmt.Errorf("no prior string %s in newContent", target)
+	}
+
+	separationIndex := strings.Index(fileContents[labelIndex:], "\n")
+	if separationIndex == -1 {
+		return "", fmt.Errorf("no new line at the end of string %s", fileContents[labelIndex:])
+	}
+
+	index := labelIndex + separationIndex + 1
+	return fileContents[:index] + newContent + fileContents[index:], nil
+
 }

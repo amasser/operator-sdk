@@ -15,21 +15,61 @@
 package flags
 
 import (
-	"github.com/operator-framework/operator-sdk/internal/flags/watch"
-	"github.com/operator-framework/operator-sdk/pkg/log/zap"
+	"runtime"
+	"time"
+
 	"github.com/spf13/pflag"
+
+	"github.com/operator-framework/operator-sdk/pkg/log/zap"
 )
 
-// HelmOperatorFlags - Options to be used by a helm operator
-type HelmOperatorFlags struct {
-	watch.WatchFlags
+// Flags - Options to be used by a helm operator
+type Flags struct {
+	ReconcilePeriod         time.Duration
+	WatchesFile             string
+	MetricsAddress          string
+	EnableLeaderElection    bool
+	LeaderElectionID        string
+	LeaderElectionNamespace string
+	MaxConcurrentReconciles int
 }
 
 // AddTo - Add the helm operator flags to the the flagset
-// helpTextPrefix will allow you add a prefix to default help text. Joined by a space.
-func AddTo(flagSet *pflag.FlagSet, helpTextPrefix ...string) *HelmOperatorFlags {
-	hof := &HelmOperatorFlags{}
-	hof.WatchFlags.AddTo(flagSet, helpTextPrefix...)
+func (f *Flags) AddTo(flagSet *pflag.FlagSet) {
 	flagSet.AddFlagSet(zap.FlagSet())
-	return hof
+	flagSet.DurationVar(&f.ReconcilePeriod,
+		"reconcile-period",
+		time.Minute,
+		"Default reconcile period for controllers",
+	)
+	flagSet.StringVar(&f.WatchesFile,
+		"watches-file",
+		"./watches.yaml",
+		"Path to the watches file to use",
+	)
+	flagSet.StringVar(&f.MetricsAddress,
+		"metrics-addr",
+		":8080",
+		"The address the metric endpoint binds to",
+	)
+	flagSet.BoolVar(&f.EnableLeaderElection,
+		"enable-leader-election",
+		false,
+		"Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.",
+	)
+	flagSet.StringVar(&f.LeaderElectionID,
+		"leader-election-id",
+		"",
+		"Name of the configmap that is used for holding the leader lock.",
+	)
+	flagSet.StringVar(&f.LeaderElectionNamespace,
+		"leader-election-namespace",
+		"",
+		"Namespace in which to create the leader election configmap for holding the leader lock (required if running locally with leader election enabled).",
+	)
+	flagSet.IntVar(&f.MaxConcurrentReconciles,
+		"max-concurrent-reconciles",
+		runtime.NumCPU(),
+		"Maximum number of concurrent reconciles for controllers.",
+	)
 }

@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/operator-framework/operator-sdk/internal/util/diffutil"
-
 	rbacv1 "k8s.io/api/rbac/v1"
 )
 
@@ -56,7 +55,15 @@ func TestRoleCustomRules(t *testing.T) {
 			{
 				APIGroups: []string{"policy"},
 				Resources: []string{"poddisruptionbudgets"},
-				Verbs:     []string{rbacv1.VerbAll},
+				Verbs: []string{
+					"create",
+					"delete",
+					"get",
+					"list",
+					"patch",
+					"update",
+					"watch",
+				},
 			},
 			{
 				APIGroups: []string{"rbac.authorization.k8s.io"},
@@ -91,7 +98,13 @@ rules:
   - configmaps
   - secrets
   verbs:
-  - "*"
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - apps
   resources:
@@ -100,35 +113,13 @@ rules:
   - replicasets
   - statefulsets
   verbs:
-  - "*"
-- apiGroups:
-  - monitoring.coreos.com
-  resources:
-  - servicemonitors
-  verbs:
-  - "get"
-  - "create"
-- apiGroups:
-  - apps
-  resources:
-  - deployments/finalizers
-  resourceNames:
-  - app-operator
-  verbs:
-  - "update"
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
+  - create
+  - delete
   - get
-- apiGroups:
-  - apps
-  resources:
-  - replicasets
-  - deployments
-  verbs:
-  - get
+  - list
+  - patch
+  - update
+  - watch
 `
 
 const clusterroleExp = `kind: ClusterRole
@@ -148,7 +139,13 @@ rules:
   - configmaps
   - secrets
   verbs:
-  - "*"
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - apps
   resources:
@@ -157,35 +154,13 @@ rules:
   - replicasets
   - statefulsets
   verbs:
-  - "*"
-- apiGroups:
-  - monitoring.coreos.com
-  resources:
-  - servicemonitors
-  verbs:
-  - "get"
-  - "create"
-- apiGroups:
-  - apps
-  resources:
-  - deployments/finalizers
-  resourceNames:
-  - app-operator
-  verbs:
-  - "update"
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
+  - create
+  - delete
   - get
-- apiGroups:
-  - apps
-  resources:
-  - replicasets
-  - deployments
-  verbs:
-  - get
+  - list
+  - patch
+  - update
+  - watch
 `
 
 const roleCustomRulesExp = `kind: Role
@@ -194,7 +169,13 @@ metadata:
   name: app-operator
 rules:
 - verbs:
-  - "*"
+  - "create"
+  - "delete"
+  - "get"
+  - "list"
+  - "patch"
+  - "update"
+  - "watch"
   apiGroups:
   - "policy"
   resources:
@@ -208,32 +189,4 @@ rules:
   resources:
   - "roles"
   - "rolebindings"
-- apiGroups:
-  - monitoring.coreos.com
-  resources:
-  - servicemonitors
-  verbs:
-  - "get"
-  - "create"
-- apiGroups:
-  - apps
-  resources:
-  - deployments/finalizers
-  resourceNames:
-  - app-operator
-  verbs:
-  - "update"
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - get
-- apiGroups:
-  - apps
-  resources:
-  - replicasets
-  - deployments
-  verbs:
-  - get
 `

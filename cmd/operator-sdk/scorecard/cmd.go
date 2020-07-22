@@ -1,4 +1,4 @@
-// Copyright 2019 The Operator-SDK Authors
+// Copyright 2020 The Operator-SDK Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,51 +15,209 @@
 package scorecard
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"time"
 
-	"github.com/operator-framework/operator-sdk/internal/scorecard"
-	schelpers "github.com/operator-framework/operator-sdk/internal/scorecard/helpers"
-	scplugins "github.com/operator-framework/operator-sdk/internal/scorecard/plugins"
-
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"k8s.io/apimachinery/pkg/labels"
+
+	scorecardannotations "github.com/operator-framework/operator-sdk/internal/annotations/scorecard"
+	"github.com/operator-framework/operator-sdk/internal/flags"
+	registryutil "github.com/operator-framework/operator-sdk/internal/registry"
+	"github.com/operator-framework/operator-sdk/internal/scorecard"
+	"github.com/operator-framework/operator-sdk/pkg/apis/scorecard/v1alpha3"
 )
 
+type scorecardCmd struct {
+	bundle         string
+	config         string
+	kubeconfig     string
+	namespace      string
+	outputFormat   string
+	selector       string
+	serviceAccount string
+	list           bool
+	skipCleanup    bool
+	waitTime       time.Duration
+}
+
 func NewCmd() *cobra.Command {
+	c := scorecardCmd{}
+
 	scorecardCmd := &cobra.Command{
 		Use:   "scorecard",
-		Short: "Run scorecard tests",
-		Long: `Runs blackbox scorecard tests on an operator
-`,
-		RunE: scorecard.ScorecardTests,
+		Short: "Runs scorecard",
+		// TODO: describe what the purpose of the command is, why someone would want
+		// to run it, etc.
+		Long: `Has flags to configure dsl, bundle, and selector. This command takes
+one argument, either a bundle image or directory containing manifests and metadata.
+If the argument holds an image tag, it must be present remotely.`,
+		PreRunE: func(cmd *cobra.Command, args []string) (err error) {
+			return c.validate(args)
+		},
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			c.bundle = args[0]
+			return c.run()
+		},
 	}
 
-	scorecardCmd.Flags().String(scorecard.ConfigOpt, "", fmt.Sprintf("config file (default is '<project_dir>/%s'; the config file's extension and format can be .yaml, .json, or .toml)", scorecard.DefaultConfigFile))
-	scorecardCmd.Flags().String(scplugins.KubeconfigOpt, "", "Path to kubeconfig of custom resource created in cluster")
-	scorecardCmd.Flags().StringP(scorecard.OutputFormatOpt, "o", scorecard.TextOutputFormat, fmt.Sprintf("Output format for results. Valid values: %s, %s", scorecard.TextOutputFormat, scorecard.JSONOutputFormat))
-	scorecardCmd.Flags().String(schelpers.VersionOpt, schelpers.DefaultScorecardVersion, "scorecard version. Valid values: v1alpha1, v1alpha2")
-	scorecardCmd.Flags().StringP(scorecard.SelectorOpt, "l", "", "selector (label query) to filter tests on (only valid when version is v1alpha2)")
-	scorecardCmd.Flags().BoolP(scorecard.ListOpt, "L", false, "If true, only print the test names that would be run based on selector filtering (only valid when version is v1alpha2)")
+	scorecardCmd.Flags().StringVar(&c.kubeconfig, "kubeconfig", "", "kubeconfig path")
+	scorecardCmd.Flags().StringVarP(&c.selector, "selector", "l", "", "label selector to determine which tests are run")
+	scorecardCmd.Flags().StringVarP(&c.config, "config", "c", "", "path to scorecard config file")
+	scorecardCmd.Flags().StringVarP(&c.namespace, "namespace", "n", "", "namespace to run the test images in")
+	scorecardCmd.Flags().StringVarP(&c.outputFormat, "output", "o", "text",
+		"Output format for results. Valid values: text, json")
+	scorecardCmd.Flags().StringVarP(&c.serviceAccount, "service-account", "s", "default",
+		"Service account to use for tests")
+	scorecardCmd.Flags().BoolVarP(&c.list, "list", "L", false,
+		"Option to enable listing which tests are run")
+	scorecardCmd.Flags().BoolVarP(&c.skipCleanup, "skip-cleanup", "x", false,
+		"Disable resource cleanup after tests are run")
+	scorecardCmd.Flags().DurationVarP(&c.waitTime, "wait-time", "w", time.Duration(30*time.Second),
+		"seconds to wait for tests to complete. Example: 35s")
 
-	// TODO: make config file global and make this a top level flag
-	if err := viper.BindPFlag(scorecard.ConfigOpt, scorecardCmd.Flags().Lookup(scorecard.ConfigOpt)); err != nil {
-		log.Fatalf("Unable to add config :%v", err)
-	}
-	if err := viper.BindPFlag("scorecard."+scplugins.KubeconfigOpt, scorecardCmd.Flags().Lookup(scplugins.KubeconfigOpt)); err != nil {
-		log.Fatalf("Unable to add kubeconfig :%v", err)
-	}
-	if err := viper.BindPFlag("scorecard."+scorecard.OutputFormatOpt, scorecardCmd.Flags().Lookup(scorecard.OutputFormatOpt)); err != nil {
-		log.Fatalf("Unable to add output format :%v", err)
-	}
-	if err := viper.BindPFlag("scorecard."+schelpers.VersionOpt, scorecardCmd.Flags().Lookup(schelpers.VersionOpt)); err != nil {
-		log.Fatalf("Unable to add version :%v", err)
-	}
-	if err := viper.BindPFlag("scorecard."+scorecard.SelectorOpt, scorecardCmd.Flags().Lookup(scorecard.SelectorOpt)); err != nil {
-		log.Fatalf("Unable to add selector :%v", err)
-	}
-	if err := viper.BindPFlag("scorecard."+scorecard.ListOpt, scorecardCmd.Flags().Lookup(scorecard.ListOpt)); err != nil {
-		log.Fatalf("Unable to add list :%v", err)
-	}
 	return scorecardCmd
+}
+
+func (c *scorecardCmd) printOutput(output v1alpha3.TestList) error {
+	switch c.outputFormat {
+	case "text":
+		if len(output.Items) == 0 {
+			fmt.Println("0 tests selected")
+			return nil
+		}
+		for _, test := range output.Items {
+			fmt.Println(test.MarshalText())
+		}
+	case "json":
+		bytes, err := json.MarshalIndent(output, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal json error: %v", err)
+		}
+		fmt.Printf("%s\n", string(bytes))
+	default:
+		return fmt.Errorf("invalid output format selected")
+	}
+	return nil
+}
+
+func (c *scorecardCmd) run() (err error) {
+	// Extract bundle image contents if bundle is inferred to be an image.
+	if _, err = os.Stat(c.bundle); err != nil && errors.Is(err, os.ErrNotExist) {
+		if c.bundle, err = extractBundleImage(c.bundle); err != nil {
+			log.Fatal(err)
+		}
+		defer func() {
+			if err := os.RemoveAll(c.bundle); err != nil {
+				log.Error(err)
+			}
+		}()
+	}
+
+	metadata, _, err := registryutil.FindBundleMetadata(c.bundle)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	o := scorecard.Scorecard{
+		SkipCleanup: c.skipCleanup,
+	}
+
+	configPath := c.config
+	if configPath == "" {
+		configDir, hasDir := scorecardannotations.GetConfigDir(metadata)
+		if !hasDir {
+			configDir = filepath.FromSlash(scorecard.DefaultConfigDir)
+		}
+		configPath = filepath.Join(c.bundle, configDir, scorecard.ConfigFileName)
+	}
+	o.Config, err = scorecard.LoadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("could not find config file %w", err)
+	}
+
+	o.Selector, err = labels.Parse(c.selector)
+	if err != nil {
+		return fmt.Errorf("could not parse selector %w", err)
+	}
+
+	var scorecardTests v1alpha3.TestList
+	if c.list {
+		scorecardTests = o.List()
+	} else {
+		runner := scorecard.PodTestRunner{
+			ServiceAccount: c.serviceAccount,
+			Namespace:      scorecard.GetKubeNamespace(c.kubeconfig, c.namespace),
+			BundlePath:     c.bundle,
+			BundleMetadata: metadata,
+		}
+
+		// Only get the client if running tests.
+		if runner.Client, err = scorecard.GetKubeClient(c.kubeconfig); err != nil {
+			return fmt.Errorf("error getting kubernetes client: %w", err)
+		}
+
+		o.TestRunner = &runner
+
+		ctx, cancel := context.WithTimeout(context.Background(), c.waitTime)
+		defer cancel()
+
+		scorecardTests, err = o.Run(ctx)
+		if err != nil {
+			return fmt.Errorf("error running tests %w", err)
+		}
+	}
+
+	if err := c.printOutput(scorecardTests); err != nil {
+		log.Fatal(err)
+	}
+
+	if hasFailingTest(scorecardTests) {
+		os.Exit(1)
+	}
+	return nil
+}
+
+func hasFailingTest(list v1alpha3.TestList) bool {
+	for _, t := range list.Items {
+		for _, r := range t.Status.Results {
+			if r.State != v1alpha3.PassState {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *scorecardCmd) validate(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("a bundle image or directory argument is required")
+	}
+	return nil
+}
+
+// discardLogger returns a logger that throws away input.
+func discardLogger() *log.Logger {
+	logger := log.New()
+	logger.SetOutput(ioutil.Discard)
+	return logger
+}
+
+// extractBundleImage returns bundleImage's path on disk post-extraction.
+func extractBundleImage(bundleImage string) (string, error) {
+	// Discard bundle extraction logs unless user sets verbose mode.
+	logger := log.NewEntry(discardLogger())
+	if viper.GetBool(flags.VerboseOpt) {
+		logger = log.WithFields(log.Fields{"bundle": bundleImage})
+	}
+	// FEAT: enable explicit local image extraction.
+	return registryutil.ExtractBundleImage(context.TODO(), logger, bundleImage, false)
 }

@@ -15,45 +15,64 @@
 package flags
 
 import (
-	"strings"
+	"runtime"
+	"time"
 
-	"github.com/operator-framework/operator-sdk/internal/flags/watch"
-	"github.com/operator-framework/operator-sdk/pkg/log/zap"
 	"github.com/spf13/pflag"
+
+	"github.com/operator-framework/operator-sdk/pkg/log/zap"
 )
 
-// AnsibleOperatorFlags - Options to be used by an ansible operator
-type AnsibleOperatorFlags struct {
-	watch.WatchFlags
-	InjectOwnerRef   bool
-	MaxWorkers       int
-	AnsibleVerbosity int
+// Flags - Options to be used by an ansible operator
+type Flags struct {
+	ReconcilePeriod         time.Duration
+	WatchesFile             string
+	InjectOwnerRef          bool
+	MaxConcurrentReconciles int
+	AnsibleVerbosity        int
+	AnsibleRolesPath        string
+	AnsibleCollectionsPath  string
 }
 
+const AnsibleRolesPathEnvVar = "ANSIBLE_ROLES_PATH"
+const AnsibleCollectionsPathEnvVar = "ANSIBLE_COLLECTIONS_PATH"
+
 // AddTo - Add the ansible operator flags to the the flagset
-// helpTextPrefix will allow you add a prefix to default help text. Joined by a space.
-func AddTo(flagSet *pflag.FlagSet, helpTextPrefix ...string) *AnsibleOperatorFlags {
-	aof := &AnsibleOperatorFlags{}
-	aof.WatchFlags.AddTo(flagSet, helpTextPrefix...)
+func (f *Flags) AddTo(flagSet *pflag.FlagSet) {
 	flagSet.AddFlagSet(zap.FlagSet())
-	flagSet.BoolVar(&aof.InjectOwnerRef,
+	flagSet.DurationVar(&f.ReconcilePeriod,
+		"reconcile-period",
+		time.Minute,
+		"Default reconcile period for controllers",
+	)
+	flagSet.StringVar(&f.WatchesFile,
+		"watches-file",
+		"./watches.yaml",
+		"Path to the watches file to use",
+	)
+	flagSet.BoolVar(&f.InjectOwnerRef,
 		"inject-owner-ref",
 		true,
-		strings.Join(append(helpTextPrefix, "The ansible operator will inject owner references unless this flag is false"), " "),
+		"The ansible operator will inject owner references unless this flag is false",
 	)
-	flagSet.IntVar(&aof.MaxWorkers,
-		"max-workers",
-		1,
-		strings.Join(append(helpTextPrefix,
-			"Maximum number of workers to use. Overridden by environment variable."),
-			" "),
+	flagSet.IntVar(&f.MaxConcurrentReconciles,
+		"max-concurrent-reconciles",
+		runtime.NumCPU(),
+		"Maximum number of concurrent reconciles for controllers. Overridden by environment variable.",
 	)
-	flagSet.IntVar(&aof.AnsibleVerbosity,
+	flagSet.IntVar(&f.AnsibleVerbosity,
 		"ansible-verbosity",
 		2,
-		strings.Join(append(helpTextPrefix,
-			"Ansible verbosity. Overridden by environment variable."),
-			" "),
+		"Ansible verbosity. Overridden by environment variable.",
 	)
-	return aof
+	flagSet.StringVar(&f.AnsibleRolesPath,
+		"ansible-roles-path",
+		"",
+		"Ansible Roles Path. If unset, roles are assumed to be in {{CWD}}/roles.",
+	)
+	flagSet.StringVar(&f.AnsibleCollectionsPath,
+		"ansible-collections-path",
+		"",
+		"Path to installed Ansible Collections. If set, collections should be located in {{value}}/ansible_collections/. If unset, collections are assumed to be in ~/.ansible/collections or /usr/share/ansible/collections.",
+	)
 }

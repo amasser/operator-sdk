@@ -17,36 +17,41 @@ package watches
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
+	"os"
 
-	yaml "gopkg.in/yaml.v2"
+	"helm.sh/helm/v3/pkg/chartutil"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/helm/pkg/chartutil"
+	"sigs.k8s.io/yaml"
 )
+
+const WatchesFile = "watches.yaml"
 
 // Watch defines options for configuring a watch for a Helm-based
 // custom resource.
 type Watch struct {
-	GroupVersionKind        schema.GroupVersionKind
-	ChartDir                string
-	WatchDependentResources bool
+	schema.GroupVersionKind `json:",inline"`
+	ChartDir                string            `json:"chart"`
+	WatchDependentResources *bool             `json:"watchDependentResources,omitempty"`
+	OverrideValues          map[string]string `json:"overrideValues,omitempty"`
 }
 
-type yamlWatch struct {
-	Group                   string `yaml:"group"`
-	Version                 string `yaml:"version"`
-	Kind                    string `yaml:"kind"`
-	Chart                   string `yaml:"chart"`
-	WatchDependentResources bool   `yaml:"watchDependentResources"`
-}
-
-func (w *yamlWatch) UnmarshalYAML(unmarshal func(interface{}) error) error {
+// UnmarshalYAML unmarshals an individual watch from the Helm watches.yaml file
+// into a Watch struct.
+//
+// Deprecated: This function is no longer used internally to unmarshal
+// watches.yaml data. To ensure the correct defaults are applied when loading
+// watches.yaml, use Load() or LoadReader() instead of this function and/or
+// yaml.Unmarshal().
+func (w *Watch) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	// by default, the operator will watch dependent resources
-	w.WatchDependentResources = true
+	trueVal := true
+	w.WatchDependentResources = &trueVal
 
 	// hide watch data in plain struct to prevent unmarshal from calling
 	// UnmarshalYAML again
-	type plain yamlWatch
+	type plain Watch
 
 	return unmarshal((*plain)(w))
 }
@@ -56,46 +61,70 @@ func (w *yamlWatch) UnmarshalYAML(unmarshal func(interface{}) error) error {
 // encountered loading the file or verifying the configuration, it will be
 // returned.
 func Load(path string) ([]Watch, error) {
-	b, err := ioutil.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not open watches file: %w", err)
 	}
+	w, err := LoadReader(f)
 
-	yamlWatches := []yamlWatch{}
-	err = yaml.Unmarshal(b, &yamlWatches)
+	// Make sure to close the file, regardless of the error returned by
+	// LoadReader.
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("could not close watches file: %w", err)
+	}
+	return w, err
+}
+
+// LoadReader loads a slice of Watches from the provided reader. For each entry
+// in the watches file, it verifies the configuration. If an error is
+// encountered reading or verifying the configuration, it will be returned.
+func LoadReader(reader io.Reader) ([]Watch, error) {
+	b, err := ioutil.ReadAll(reader)
 	if err != nil {
 		return nil, err
 	}
 
 	watches := []Watch{}
-	watchesMap := make(map[schema.GroupVersionKind]Watch)
-	for _, w := range yamlWatches {
-		gvk := schema.GroupVersionKind{
-			Group:   w.Group,
-			Version: w.Version,
-			Kind:    w.Kind,
-		}
+	err = yaml.Unmarshal(b, &watches)
+	if err != nil {
+		return nil, err
+	}
+
+	watchesMap := make(map[schema.GroupVersionKind]struct{})
+	for i, w := range watches {
+		gvk := w.GroupVersionKind
 
 		if err := verifyGVK(gvk); err != nil {
-			return nil, fmt.Errorf("invalid GVK: %s: %s", gvk, err)
+			return nil, fmt.Errorf("invalid GVK: %s: %w", gvk, err)
 		}
 
-		if _, err := chartutil.IsChartDir(w.Chart); err != nil {
-			return nil, fmt.Errorf("invalid chart directory %s: %s", w.Chart, err)
+		if _, err := chartutil.IsChartDir(w.ChartDir); err != nil {
+			return nil, fmt.Errorf("invalid chart directory %s: %w", w.ChartDir, err)
 		}
 
 		if _, ok := watchesMap[gvk]; ok {
 			return nil, fmt.Errorf("duplicate GVK: %s", gvk)
 		}
-		watch := Watch{
-			GroupVersionKind:        gvk,
-			ChartDir:                w.Chart,
-			WatchDependentResources: w.WatchDependentResources,
+		watchesMap[gvk] = struct{}{}
+		if w.WatchDependentResources == nil {
+			trueVal := true
+			w.WatchDependentResources = &trueVal
 		}
-		watchesMap[gvk] = watch
-		watches = append(watches, watch)
+		w.OverrideValues = expandOverrideEnvs(w.OverrideValues)
+		watches[i] = w
 	}
 	return watches, nil
+}
+
+func expandOverrideEnvs(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string)
+	for k, v := range in {
+		out[k] = os.ExpandEnv(v)
+	}
+	return out
 }
 
 func verifyGVK(gvk schema.GroupVersionKind) error {

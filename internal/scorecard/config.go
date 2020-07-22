@@ -1,4 +1,4 @@
-// Copyright 2019 The Operator-SDK Authors
+// Copyright 2020 The Operator-SDK Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,68 +15,55 @@
 package scorecard
 
 import (
-	"fmt"
-	"strings"
+	"io/ioutil"
 
-	schelpers "github.com/operator-framework/operator-sdk/internal/scorecard/helpers"
-	"gopkg.in/yaml.v2"
+	"sigs.k8s.io/yaml"
 )
 
-type externalPluginConfig struct {
-	Command string              `mapstructure:"command"`
-	Args    []string            `mapstructure:"args"`
-	Env     []externalPluginEnv `mapstructure:"env"`
+const (
+	// ConfigFileName is the scorecard's hard-coded config file name.
+	ConfigFileName = "config.yaml"
+	// DefaultConfigDir is the default scorecard path within a bundle.
+	DefaultConfigDir = "tests/scorecard/"
+)
+
+type Stage struct {
+	Parallel bool   `yaml:"parallel"`
+	Tests    []Test `yaml:"tests"`
 }
 
-type externalPluginEnv struct {
-	Name  string `mapstructure:"name"`
-	Value string `mapstructure:"value"`
+type Test struct {
+	// Image is the name of the testimage
+	Image string `json:"image"`
+	// Entrypoint is list of commands and arguments passed to the test image
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	// Labels that further describe the test and enable selection
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
-func (e externalPluginConfig) String() string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Command: %s %s", e.Command, strings.Join(e.Args, " ")))
-	if e.Env != nil {
-		sb.WriteString(fmt.Sprintf("\nEnvironment: "))
-	}
-	for _, env := range e.Env {
-		sb.WriteString(fmt.Sprintf("\n\t%s", env))
-	}
-	return sb.String()
+// Config represents the set of test configurations which scorecard
+// would run based on user input
+type Config struct {
+	Stages []Stage `yaml:"stages"`
 }
 
-func (e externalPluginEnv) String() string {
-	return fmt.Sprintf("%s=%s", e.Name, e.Value)
-}
+// LoadConfig will find and return the scorecard config, the config file
+// is found from a bundle location (TODO bundle image)
+// scorecard config.yaml is expected to be in the bundle at the following
+// location:  tests/scorecard/config.yaml
+// the user can override this location using the --config CLI flag
+func LoadConfig(configFilePath string) (Config, error) {
+	c := Config{}
 
-// validateConfig takes a viper config for a plugin and returns a nil error if valid or an error explaining why the config is invalid
-func validateConfig(config pluginConfig, idx int, version string) error {
-	// find plugin config type
-	pluginType := ""
-	if config.Basic != nil {
-		pluginType = "basic"
+	// TODO handle bundle images, not just on-disk
+	yamlFile, err := ioutil.ReadFile(configFilePath)
+	if err != nil {
+		return c, err
 	}
-	if config.Olm != nil {
-		if pluginType != "" {
-			return fmt.Errorf("plugin config can only contain one of: basic, olm, external")
-		}
-		pluginType = "olm"
+
+	if err := yaml.Unmarshal(yamlFile, &c); err != nil {
+		return c, err
 	}
-	if config.External != nil {
-		if pluginType != "" {
-			return fmt.Errorf("plugin config can only contain one of: basic, olm, external")
-		}
-		pluginType = "external"
-		if schelpers.IsV1alpha2(version) {
-			return fmt.Errorf("revert to v1alpha1 to use external plugins: external plugins are not currently supported with v1alpha2")
-		}
-	}
-	if pluginType == "" {
-		marshalledConfig, err := yaml.Marshal(config)
-		if err != nil {
-			return fmt.Errorf("plugin #%d has a missing or incorrect type", idx)
-		}
-		return fmt.Errorf("plugin #%d has a missing or incorrect type. Invalid plugin config: %s", idx, marshalledConfig)
-	}
-	return nil
+
+	return c, nil
 }
